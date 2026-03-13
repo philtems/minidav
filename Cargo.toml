@@ -1,0 +1,26 @@
+[package]
+name = "minidav"
+version = "1.0.0"
+edition = "2021"
+authors = ["Philippe TEMESI"]
+description = "Minimal WebDAV server"
+
+[dependencies]
+getopts = "0.2"
+tiny_http = "0.12"
+base64 = "0.22.1"
+urlencoding = "2.1"
+ascii = "1.1"
+libc = "0.2"
+chrono = "0.4"
+percent-encoding = "2.3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+split-debuginfo = "packed"
+strip = true
+incremental = true
+

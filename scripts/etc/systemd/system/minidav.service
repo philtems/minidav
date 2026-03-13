@@ -1,0 +1,16 @@
+[Unit]
+Description=Minimal WebDAV Server
+After=network.target
+
+[Service]
+Type=forking
+User=webdav
+Group=webdav
+ExecStart=/usr/local/bin/minidav -d --auth-file /etc/minidav/users.txt --log /var/log/minidav.log
+PIDFile=/var/run/minidav.pid
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
