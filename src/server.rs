@@ -108,10 +108,12 @@ fn handle_request(mut request: Request, auth_manager: Arc<AuthManager>, protecto
         "HEAD" => handle_head(&physical_path, &user, &remote_addr, &url, &logger),
         "PROPFIND" => webdav::handle_propfind(&request, &physical_path, &user, &remote_addr, &url, &logger),
         "MKCOL" => webdav::handle_mkcol(&request, &physical_path, &user, &remote_addr, &url, &logger),
+        "COPY" => webdav::handle_copy(&request, &physical_path, &user, &remote_addr, &url, &logger, &root_path),
+        "MOVE" => webdav::handle_move(&request, &physical_path, &user, &remote_addr, &url, &logger, &root_path),
         _ => {
             logger.access(&remote_addr, &user, &method_str, &url, 405, 0);
             let mut response = empty_response(405);
-            response.add_header(Header::from_bytes("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL").unwrap());
+            response.add_header(Header::from_bytes("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, COPY, MOVE").unwrap());
             response
         }
     };
@@ -179,7 +181,7 @@ fn authenticate_request(request: &Request, auth_manager: &AuthManager, protector
     }
 }
 
-fn build_physical_path(url: &str, root_path: &Path) -> Option<PathBuf> {
+pub fn build_physical_path(url: &str, root_path: &Path) -> Option<PathBuf> {
     let mut current = url.to_string();
     let mut previous;
     let mut iterations = 0;
@@ -396,7 +398,6 @@ fn handle_head(physical_path: &Path, user: &str, remote_addr: &str, url: &str, l
 }
 
 fn handle_put(request: &mut Request, physical_path: &Path, user: &str, remote_addr: &str, url: &str, logger: &Logger) -> Response<Cursor<Vec<u8>>> {
-    // Vérifier si le chemin existe déjà et si c'est un dossier
     if physical_path.exists() {
         if physical_path.is_dir() {
             logger.access(remote_addr, user, "PUT", url, 409, 0);
@@ -405,7 +406,6 @@ fn handle_put(request: &mut Request, physical_path: &Path, user: &str, remote_ad
         logger.debug(&format!("Overwriting existing file: {}", physical_path.display()));
     }
     
-    // Créer les dossiers parents si nécessaire
     if let Some(parent) = physical_path.parent() {
         if !parent.exists() {
             if let Err(e) = fs::create_dir_all(parent) {
@@ -416,15 +416,13 @@ fn handle_put(request: &mut Request, physical_path: &Path, user: &str, remote_ad
         }
     }
     
-    // Lire toutes les données de la requête
     let mut data = Vec::new();
     let mut reader = request.as_reader();
     
-    // Lire en boucle jusqu'à épuisement des données
     loop {
-        let mut buffer = [0; 16384]; // Buffer de 16KB
+        let mut buffer = [0; 16384];
         match reader.read(&mut buffer) {
-            Ok(0) => break, // Fin des données
+            Ok(0) => break,
             Ok(n) => data.extend_from_slice(&buffer[0..n]),
             Err(e) => {
                 logger.error(&format!("PUT data read error: {}", e));
@@ -436,10 +434,8 @@ fn handle_put(request: &mut Request, physical_path: &Path, user: &str, remote_ad
     
     logger.debug(&format!("PUT data size: {} bytes", data.len()));
     
-    // Écrire le fichier
     match fs::write(physical_path, &data) {
         Ok(_) => {
-            // 201 Created pour nouveau fichier, 200 OK pour mise à jour
             let status = if physical_path.exists() { 200 } else { 201 };
             logger.access(remote_addr, user, "PUT", url, status, data.len() as u64);
             empty_response(status)

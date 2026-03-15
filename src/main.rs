@@ -9,6 +9,7 @@ mod server;
 mod logging;
 mod webdav;
 mod brute_force;
+mod hash;
 
 use auth::AuthManager;
 use logging::Logger;
@@ -16,6 +17,10 @@ use server::DavServer;
 use brute_force::BruteForceProtector;
 
 const SECRET_DAEMON_FLAG: &str = "--daemonize";
+const VERSION: &str = "1.1.0";
+const YEAR: &str = "2026";
+const AUTHOR: &str = "Philippe TEMESI";
+const WEBSITE: &str = "https://www.tems.be";
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -38,8 +43,21 @@ fn main() {
         }
     };
     
+    if matches.opt_present("hash-password") {
+        if let Some(password) = matches.opt_str("hash-password") {
+            let hashed = hash::hash_password(&password);
+            println!("{}", hashed);
+            process::exit(0);
+        }
+    }
+    
     if matches.opt_present("h") || matches.opt_present("help") {
         print_usage(&program);
+        process::exit(0);
+    }
+    
+    if matches.opt_present("v") || matches.opt_present("version") {
+        print_version();
         process::exit(0);
     }
     
@@ -124,7 +142,9 @@ fn parse_arguments(args: &[String]) -> Result<getopts::Matches, getopts::Fail> {
     opts.optopt("l", "log", "Log file", "FILE");
     opts.optopt("", "max-attempts", "Max attempts before blocking (default: 5)", "NUMBER");
     opts.optopt("", "block-time", "Block time in seconds (default: 300)", "SECONDS");
+    opts.optopt("", "hash-password", "Hash a password and exit", "PASSWORD");
     opts.optflag("d", "daemon", "Run in daemon mode");
+    opts.optflag("v", "version", "Show version information");
     opts.optflag("h", "help", "Show this help");
     
     opts.optflag("", "daemonize", "Internal mode - do not use");
@@ -133,16 +153,17 @@ fn parse_arguments(args: &[String]) -> Result<getopts::Matches, getopts::Fail> {
 }
 
 fn print_usage(program: &str) {
+    println!("{} version {} ({})", program, VERSION, YEAR);
+    println!("Author: {} - {}", AUTHOR, WEBSITE);
+    println!();
     let brief = format!("Usage: {} [options]\n\n\
                          Minimal WebDAV server\n\n\
-                         Author: Philippe TEMESI\n\
-                         Website: https://www.tems.be\n\
-                         Version: 1.0 (2026)\n\n\
                          Examples:\n\
                          {} -p 8080 --auth-file users.txt -l access.log\n\
                          {} -i 127.0.0.1 -p 8888 --auth-file users.txt -d\n\
-                         {} -p 8080 --auth-file users.txt --max-attempts 3 --block-time 600\n\n\
-                         Options:", program, program, program, program);
+                         {} -p 8080 --auth-file users.txt --max-attempts 3 --block-time 600\n\
+                         {} --hash-password \"mysecret\"\n\n\
+                         Options:", program, program, program, program, program);
     
     let mut opts = Options::new();
     opts.optopt("i", "ip", "Listen address (default: 0.0.0.0)", "ADDRESS");
@@ -151,10 +172,18 @@ fn print_usage(program: &str) {
     opts.optopt("l", "log", "Log file", "FILE");
     opts.optopt("", "max-attempts", "Max attempts before blocking (default: 5)", "NUMBER");
     opts.optopt("", "block-time", "Block time in seconds (default: 300)", "SECONDS");
+    opts.optopt("", "hash-password", "Hash a password and exit", "PASSWORD");
     opts.optflag("d", "daemon", "Run in daemon mode");
+    opts.optflag("v", "version", "Show version information");
     opts.optflag("h", "help", "Show this help");
     
     println!("{}", opts.usage(&brief));
+}
+
+fn print_version() {
+    println!("minidav version {} ({})", VERSION, YEAR);
+    println!("Author: {} - {}", AUTHOR, WEBSITE);
+    println!("WebDAV server with COPY and MOVE support");
 }
 
 fn start_daemon_mode(args: &[String], program: &str) {

@@ -68,7 +68,7 @@ pub fn handle_propfind(request: &Request, physical_path: &Path, user: &str, remo
     let mut response = Response::from_string(xml)
         .with_status_code(StatusCode(207));
     response.add_header(Header::from_bytes("Content-Type", "application/xml; charset=utf-8").unwrap());
-    response.add_header(Header::from_bytes("DAV", "1").unwrap());
+    response.add_header(Header::from_bytes("DAV", "1,2").unwrap());
     response
 }
 
@@ -148,7 +148,7 @@ fn add_propfind_response(xml: &mut String, base_url: &str, href: &str, path: &Pa
     xml.push_str("  </D:response>\n");
 }
 
-pub fn handle_mkcol(_request: &Request, physical_path: &Path, user: &str, remote_addr: &str, url: &str, logger: &Logger) -> Response<Cursor<Vec<u8>>> {
+pub fn handle_mkcol(request: &Request, physical_path: &Path, user: &str, remote_addr: &str, url: &str, logger: &Logger) -> Response<Cursor<Vec<u8>>> {
     if physical_path.exists() {
         logger.access(remote_addr, user, "MKCOL", url, 405, 0);
         return empty_response(405);
@@ -165,6 +165,169 @@ pub fn handle_mkcol(_request: &Request, physical_path: &Path, user: &str, remote
             empty_response(409)
         }
     }
+}
+
+pub fn handle_copy(request: &Request, physical_path: &Path, user: &str, remote_addr: &str, url: &str, logger: &Logger, root_path: &Path) -> Response<Cursor<Vec<u8>>> {
+    if !physical_path.exists() {
+        logger.access(remote_addr, user, "COPY", url, 404, 0);
+        return empty_response(404);
+    }
+    
+    let destination = match get_destination_header(request, root_path, logger) {
+        Some(dest) => dest,
+        None => {
+            logger.access(remote_addr, user, "COPY", url, 400, 0);
+            return empty_response(400);
+        }
+    };
+    
+    let overwrite = get_overwrite_header(request);
+    
+    if destination.exists() && !overwrite {
+        logger.access(remote_addr, user, "COPY", url, 412, 0);
+        return empty_response(412);
+    }
+    
+    if destination.exists() && destination.is_dir() {
+        logger.access(remote_addr, user, "COPY", url, 409, 0);
+        return empty_response(409);
+    }
+    
+    if let Some(parent) = destination.parent() {
+        if !parent.exists() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                logger.error(&format!("Directory creation error {}: {}", parent.display(), e));
+                logger.access(remote_addr, user, "COPY", url, 500, 0);
+                return empty_response(500);
+            }
+        }
+    }
+    
+    let result = if physical_path.is_dir() {
+        copy_dir_all(physical_path, &destination)
+    } else {
+        fs::copy(physical_path, &destination).map(|_| ())
+    };
+    
+    match result {
+        Ok(_) => {
+            let status = if destination.exists() && overwrite { 204 } else { 201 };
+            logger.access(remote_addr, user, "COPY", url, status, 0);
+            empty_response(status)
+        }
+        Err(e) => {
+            logger.error(&format!("Copy error from {} to {}: {}", physical_path.display(), destination.display(), e));
+            logger.access(remote_addr, user, "COPY", url, 500, 0);
+            empty_response(500)
+        }
+    }
+}
+
+pub fn handle_move(request: &Request, physical_path: &Path, user: &str, remote_addr: &str, url: &str, logger: &Logger, root_path: &Path) -> Response<Cursor<Vec<u8>>> {
+    if !physical_path.exists() {
+        logger.access(remote_addr, user, "MOVE", url, 404, 0);
+        return empty_response(404);
+    }
+    
+    let destination = match get_destination_header(request, root_path, logger) {
+        Some(dest) => dest,
+        None => {
+            logger.access(remote_addr, user, "MOVE", url, 400, 0);
+            return empty_response(400);
+        }
+    };
+    
+    let overwrite = get_overwrite_header(request);
+    
+    if destination.exists() && !overwrite {
+        logger.access(remote_addr, user, "MOVE", url, 412, 0);
+        return empty_response(412);
+    }
+    
+    if destination.exists() && destination.is_dir() {
+        logger.access(remote_addr, user, "MOVE", url, 409, 0);
+        return empty_response(409);
+    }
+    
+    if destination.exists() {
+        if destination.is_dir() {
+            if let Err(e) = fs::remove_dir_all(&destination) {
+                logger.error(&format!("Directory removal error {}: {}", destination.display(), e));
+                logger.access(remote_addr, user, "MOVE", url, 500, 0);
+                return empty_response(500);
+            }
+        } else {
+            if let Err(e) = fs::remove_file(&destination) {
+                logger.error(&format!("File removal error {}: {}", destination.display(), e));
+                logger.access(remote_addr, user, "MOVE", url, 500, 0);
+                return empty_response(500);
+            }
+        }
+    }
+    
+    if let Some(parent) = destination.parent() {
+        if !parent.exists() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                logger.error(&format!("Directory creation error {}: {}", parent.display(), e));
+                logger.access(remote_addr, user, "MOVE", url, 500, 0);
+                return empty_response(500);
+            }
+        }
+    }
+    
+    match fs::rename(physical_path, &destination) {
+        Ok(_) => {
+            logger.access(remote_addr, user, "MOVE", url, 201, 0);
+            empty_response(201)
+        }
+        Err(e) => {
+            logger.error(&format!("Move error from {} to {}: {}", physical_path.display(), destination.display(), e));
+            logger.access(remote_addr, user, "MOVE", url, 500, 0);
+            empty_response(500)
+        }
+    }
+}
+
+fn get_destination_header(request: &Request, root_path: &Path, logger: &Logger) -> Option<std::path::PathBuf> {
+    let dest_header = request.headers().iter()
+        .find(|h| h.field.as_str().to_ascii_lowercase() == "destination")?;
+    
+    let dest_str = dest_header.value.as_str();
+    logger.debug(&format!("Destination header: {}", dest_str));
+    
+    let uri = dest_str.split("://").nth(1)?;
+    let path_start = uri.find('/')?;
+    let url_path = &uri[path_start..];
+    
+    crate::server::build_physical_path(url_path, root_path)
+}
+
+fn get_overwrite_header(request: &Request) -> bool {
+    request.headers().iter()
+        .find(|h| h.field.as_str().to_ascii_lowercase() == "overwrite")
+        .map(|h| h.value.as_str().to_ascii_lowercase() != "f")
+        .unwrap_or(true)
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if !dst.exists() {
+        fs::create_dir_all(dst)?;
+    }
+    
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        
+        if ty.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    
+    Ok(())
 }
 
 pub fn handle_options() -> Response<Cursor<Vec<u8>>> {

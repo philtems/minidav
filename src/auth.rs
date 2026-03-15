@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use crate::logging::Logger;
+use crate::hash;
 
 pub struct User {
     pub login: String,
@@ -92,7 +93,7 @@ impl AuthManager {
     
     pub fn authenticate(&self, login: &str, password: &str) -> Option<&User> {
         self.users.get(login).and_then(|user| {
-            if user.password == password {
+            if hash::verify_password(password, &user.password) {
                 Some(user)
             } else {
                 None
