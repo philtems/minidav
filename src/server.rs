@@ -1,8 +1,9 @@
-use tiny_http::{Server, Request, Response, Method, StatusCode, Header};
+use tiny_http::{Server, Request, Response, StatusCode, Header};
 use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::io::Cursor;
+use std::fs::File;
+use std::io::{self, BufReader, Read, Write, Cursor, Seek, SeekFrom};
 use base64::prelude::*;
 use percent_encoding::percent_decode_str;
 
@@ -60,6 +61,7 @@ fn handle_request(mut request: Request, auth_manager: Arc<AuthManager>, protecto
     let method_str = method.as_str().to_string();
     let url = request.url().to_string();
     
+    // On logue TOUTES les requêtes entrantes en DEBUG (utile pour déboguer si le GET ne sort pas)
     logger.debug(&format!("Request {} {} from {}", method_str, url, remote_addr));
     
     if method_str == "OPTIONS" {
@@ -101,24 +103,45 @@ fn handle_request(mut request: Request, auth_manager: Arc<AuthManager>, protecto
     
     logger.debug(&format!("Physical path: {}", physical_path.display()));
     
-    let response = match method_str.as_str() {
-        "GET" => handle_get(&physical_path, &user, &remote_addr, &url, &logger),
-        "PUT" => handle_put(&mut request, &physical_path, &user, &remote_addr, &url, &logger),
-        "DELETE" => handle_delete(&physical_path, &user, &remote_addr, &url, &logger),
-        "HEAD" => handle_head(&physical_path, &user, &remote_addr, &url, &logger),
-        "PROPFIND" => webdav::handle_propfind(&request, &physical_path, &user, &remote_addr, &url, &logger),
-        "MKCOL" => webdav::handle_mkcol(&request, &physical_path, &user, &remote_addr, &url, &logger),
-        "COPY" => webdav::handle_copy(&request, &physical_path, &user, &remote_addr, &url, &logger, &root_path),
-        "MOVE" => webdav::handle_move(&request, &physical_path, &user, &remote_addr, &url, &logger, &root_path),
+    match method_str.as_str() {
+        "GET" => {
+            handle_get_and_respond(request, &physical_path, &user, &remote_addr, &url, &logger);
+        },
+        "PUT" => {
+            let response = handle_put(&mut request, &physical_path, &user, &remote_addr, &url, &logger);
+            let _ = request.respond(response);
+        },
+        "DELETE" => {
+            let response = handle_delete(&physical_path, &user, &remote_addr, &url, &logger);
+            let _ = request.respond(response);
+        },
+        "HEAD" => {
+            let response = handle_head(&physical_path, &user, &remote_addr, &url, &logger);
+            let _ = request.respond(response);
+        },
+        "PROPFIND" => {
+            let response = webdav::handle_propfind(&request, &physical_path, &user, &remote_addr, &url, &logger);
+            let _ = request.respond(response);
+        },
+        "MKCOL" => {
+            let response = webdav::handle_mkcol(&request, &physical_path, &user, &remote_addr, &url, &logger);
+            let _ = request.respond(response);
+        },
+        "COPY" => {
+            let response = webdav::handle_copy(&request, &physical_path, &user, &remote_addr, &url, &logger, &root_path);
+            let _ = request.respond(response);
+        },
+        "MOVE" => {
+            let response = webdav::handle_move(&request, &physical_path, &user, &remote_addr, &url, &logger, &root_path);
+            let _ = request.respond(response);
+        },
         _ => {
             logger.access(&remote_addr, &user, &method_str, &url, 405, 0);
             let mut response = empty_response(405);
             response.add_header(Header::from_bytes("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, COPY, MOVE").unwrap());
-            response
+            let _ = request.respond(response);
         }
     };
-    
-    let _ = request.respond(response);
 }
 
 fn empty_response(status: u16) -> Response<Cursor<Vec<u8>>> {
@@ -247,10 +270,121 @@ fn clean_path(path: &str) -> String {
     }
 }
 
-fn handle_get(physical_path: &Path, user: &str, remote_addr: &str, url: &str, logger: &Logger) -> Response<Cursor<Vec<u8>>> {
+fn get_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        // Texte
+        Some("txt") => "text/plain",
+        Some("html") | Some("htm") => "text/html",
+        Some("css") => "text/css",
+        Some("js") => "application/javascript",
+        Some("json") => "application/json",
+        Some("xml") => "application/xml",
+        Some("csv") => "text/csv",
+        Some("md") | Some("markdown") => "text/markdown",
+        
+        // Images
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("ico") => "image/x-icon",
+        Some("tiff") | Some("tif") => "image/tiff",
+        
+        // Audio
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") => "audio/ogg",
+        Some("wav") => "audio/wav",
+        Some("flac") => "audio/flac",
+        Some("aac") => "audio/aac",
+        Some("m4a") => "audio/mp4",
+        
+        // Vidéo
+        Some("mp4") => "video/mp4",
+        Some("mkv") => "video/x-matroska",
+        Some("webm") => "video/webm",
+        Some("avi") => "video/x-msvideo",
+        Some("mov") => "video/quicktime",
+        Some("wmv") => "video/x-ms-wmv",
+        Some("flv") => "video/x-flv",
+        Some("m4v") => "video/x-m4v",
+        Some("mpeg") | Some("mpg") => "video/mpeg",
+        
+        // Documents
+        Some("pdf") => "application/pdf",
+        Some("doc") => "application/msword",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xls") => "application/vnd.ms-excel",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("ppt") => "application/vnd.ms-powerpoint",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        
+        // Archives
+        Some("zip") => "application/zip",
+        Some("tar") => "application/x-tar",
+        Some("gz") => "application/gzip",
+        Some("7z") => "application/x-7z-compressed",
+        Some("rar") => "application/vnd.rar",
+        
+        // Fallback
+        _ => "application/octet-stream",
+    }
+}
+
+// Structure pour parser les ranges HTTP
+struct ByteRange {
+    start: u64,
+    end: u64, // Inclusif
+}
+
+fn parse_range_header(range_header: &str, file_size: u64) -> Option<ByteRange> {
+    if !range_header.starts_with("bytes=") {
+        return None;
+    }
+    
+    let range_spec = &range_header[6..];
+    let parts: Vec<&str> = range_spec.split('-').collect();
+    
+    if parts.len() != 2 {
+        return None;
+    }
+    
+    let start = if parts[0].is_empty() {
+        // Cas: bytes=-500 (les 500 derniers octets)
+        let suffix_len = parts[1].parse::<u64>().ok()?;
+        if suffix_len >= file_size {
+            0
+        } else {
+            file_size - suffix_len
+        }
+    } else {
+        parts[0].parse::<u64>().ok()?
+    };
+    
+    let end = if parts[1].is_empty() {
+        // Cas: bytes=500- (de 500 jusqu'à la fin)
+        file_size - 1
+    } else {
+        parts[1].parse::<u64>().ok()?
+    };
+    
+    // Validation des bornes
+    if start > end || start >= file_size {
+        return None;
+    }
+    
+    Some(ByteRange {
+        start,
+        end: end.min(file_size - 1),
+    })
+}
+
+fn handle_get_and_respond(request: Request, physical_path: &Path, user: &str, remote_addr: &str, url: &str, logger: &Logger) {
     if !physical_path.exists() {
         logger.access(remote_addr, user, "GET", url, 404, 0);
-        return empty_response(404);
+        let _ = request.respond(empty_response(404));
+        return;
     }
     
     if physical_path.is_dir() {
@@ -319,35 +453,110 @@ fn handle_get(physical_path: &Path, user: &str, remote_addr: &str, url: &str, lo
         let mut response = Response::from_string(content)
             .with_status_code(StatusCode(200));
         response.add_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
-        response
+        let _ = request.respond(response);
     } else {
-        match fs::read(physical_path) {
-            Ok(data) => {
-                let size = data.len() as u64;
-                logger.access(remote_addr, user, "GET", url, 200, size);
-                
-                let content_type = match physical_path.extension().and_then(|e| e.to_str()) {
-                    Some("txt") => "text/plain",
-                    Some("html") | Some("htm") => "text/html",
-                    Some("css") => "text/css",
-                    Some("js") => "application/javascript",
-                    Some("json") => "application/json",
-                    Some("png") => "image/png",
-                    Some("jpg") | Some("jpeg") => "image/jpeg",
-                    Some("gif") => "image/gif",
-                    Some("pdf") => "application/pdf",
-                    _ => "application/octet-stream",
+        match File::open(physical_path) {
+            Ok(file) => {
+                let metadata = match file.metadata() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        logger.error(&format!("Metadata error {}: {}", physical_path.display(), e));
+                        logger.access(remote_addr, user, "GET", url, 500, 0);
+                        let _ = request.respond(empty_response(500));
+                        return;
+                    }
                 };
                 
-                let mut response = Response::from_data(data)
-                    .with_status_code(StatusCode(200));
-                response.add_header(Header::from_bytes("Content-Type", content_type).unwrap());
-                response
+                let file_size = metadata.len();
+                let content_type = get_content_type(physical_path);
+                
+                // LOG IMMÉDIAT (INFO) : On logue dès qu'on a les infos, avant de gérer le range
+                // Cela garantit que le log apparaît même si le traitement Range échoue plus loin
+                // et même en mode daemon (car c'est un 'info' implicite via logger.access plus bas)
+                
+                // Vérifier l'en-tête Range
+                let range_header = request.headers().iter()
+                    .find(|h| h.field.as_str().to_ascii_lowercase() == "range")
+                    .map(|h| h.value.as_str());
+                
+                if let Some(range_str) = range_header {
+                    // Gestion du Range Request (VLC, Seek, etc.)
+                    if let Some(range) = parse_range_header(range_str, file_size) {
+                        let content_length = range.end - range.start + 1;
+                        
+                        logger.debug(&format!("Range request parsed: {}-{}", range.start, range.end));
+                        
+                        // Ouvrir le fichier avec BufReader pour le streaming
+                        let mut reader = BufReader::with_capacity(256 * 1024, file);
+                        
+                        // Se positionner au début du range
+                        if let Err(e) = reader.seek(SeekFrom::Start(range.start)) {
+                            logger.error(&format!("Seek error: {}", e));
+                            logger.access(remote_addr, user, "GET", url, 500, 0);
+                            let _ = request.respond(empty_response(500));
+                            return;
+                        }
+                        
+                        // Préparer les en-têtes spécifiques au Range
+                        let content_range_header = format!("bytes {}-{}/{}", range.start, range.end, file_size);
+                        
+                        let mut response = Response::new(
+                            StatusCode(206), // 206 Partial Content
+                            vec![
+                                Header::from_bytes("Content-Type", content_type).unwrap(),
+                                Header::from_bytes("Content-Length", content_length.to_string().as_str()).unwrap(),
+                                Header::from_bytes("Content-Range", content_range_header.as_str()).unwrap(),
+                                Header::from_bytes("Accept-Ranges", "bytes").unwrap(),
+                            ],
+                            Box::new(reader.take(content_length)) as Box<dyn Read + Send>,
+                            Some(content_length as usize),
+                            None,
+                        );
+                        
+                        // LOG ACCESS : Utilise la méthode access() qui écrit toujours (INFO/ACCESS)
+                        logger.access(remote_addr, user, "GET", url, 206, content_length);
+                        
+                        if let Err(e) = request.respond(response) {
+                            logger.error(&format!("Error sending Range response: {}", e));
+                        }
+                        return;
+                    } else {
+                        // Range invalide
+                        logger.warning(&format!("Invalid range header: {}", range_str));
+                        logger.access(remote_addr, user, "GET", url, 416, 0);
+                        let mut response = empty_response(416);
+                        response.add_header(Header::from_bytes("Content-Range", format!("bytes */{}", file_size).as_str()).unwrap());
+                        let _ = request.respond(response);
+                        return;
+                    }
+                }
+                
+                // Cas normal : pas de range, on envoie tout le fichier
+                let reader = BufReader::with_capacity(256 * 1024, file);
+                
+                let mut response = Response::new(
+                    StatusCode(200),
+                    vec![
+                        Header::from_bytes("Content-Type", content_type).unwrap(),
+                        Header::from_bytes("Content-Length", file_size.to_string().as_str()).unwrap(),
+                        Header::from_bytes("Accept-Ranges", "bytes").unwrap(),
+                    ],
+                    Box::new(reader) as Box<dyn Read + Send>,
+                    Some(file_size as usize),
+                    None,
+                );
+                
+                // LOG ACCESS : Garantit l'écriture dans le fichier de log et la console (si pas daemon)
+                logger.access(remote_addr, user, "GET", url, 200, file_size);
+                
+                if let Err(e) = request.respond(response) {
+                    logger.error(&format!("Error sending GET response: {}", e));
+                }
             }
             Err(e) => {
+                logger.error(&format!("File open error {}: {}", physical_path.display(), e));
                 logger.access(remote_addr, user, "GET", url, 500, 0);
-                logger.error(&format!("File read error {}: {}", physical_path.display(), e));
-                empty_response(500)
+                let _ = request.respond(empty_response(500));
             }
         }
     }
@@ -370,22 +579,12 @@ fn handle_head(physical_path: &Path, user: &str, remote_addr: &str, url: &str, l
                 let size = metadata.len();
                 logger.access(remote_addr, user, "HEAD", url, 200, size);
                 
-                let content_type = match physical_path.extension().and_then(|e| e.to_str()) {
-                    Some("txt") => "text/plain",
-                    Some("html") | Some("htm") => "text/html",
-                    Some("css") => "text/css",
-                    Some("js") => "application/javascript",
-                    Some("json") => "application/json",
-                    Some("png") => "image/png",
-                    Some("jpg") | Some("jpeg") => "image/jpeg",
-                    Some("gif") => "image/gif",
-                    Some("pdf") => "application/pdf",
-                    _ => "application/octet-stream",
-                };
+                let content_type = get_content_type(physical_path);
                 
                 let mut response = empty_response(200);
                 response.add_header(Header::from_bytes("Content-Type", content_type).unwrap());
                 response.add_header(Header::from_bytes("Content-Length", size.to_string().as_str()).unwrap());
+                response.add_header(Header::from_bytes("Accept-Ranges", "bytes").unwrap());
                 response
             }
             Err(e) => {
@@ -416,36 +615,52 @@ fn handle_put(request: &mut Request, physical_path: &Path, user: &str, remote_ad
         }
     }
     
-    let mut data = Vec::new();
-    let mut reader = request.as_reader();
+    // STREAMING PUT : Ouverture du fichier en écriture directe
+    let mut output_file = match File::create(physical_path) {
+        Ok(f) => f,
+        Err(e) => {
+            logger.error(&format!("Cannot create file {}: {}", physical_path.display(), e));
+            logger.access(remote_addr, user, "PUT", url, 500, 0);
+            return empty_response(500);
+        }
+    };
+    
+    let reader = request.as_reader();
+    let mut total_bytes: u64 = 0;
+    let mut buffer = [0u8; 65536]; // Buffer 64 Ko
     
     loop {
-        let mut buffer = [0; 16384];
         match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => data.extend_from_slice(&buffer[0..n]),
+            Ok(0) => break, // Fin du flux
+            Ok(n) => {
+                match output_file.write_all(&buffer[0..n]) {
+                    Ok(_) => total_bytes += n as u64,
+                    Err(e) => {
+                        logger.error(&format!("Write error {}: {}", physical_path.display(), e));
+                        logger.access(remote_addr, user, "PUT", url, 500, 0);
+                        return empty_response(500);
+                    }
+                }
+            }
             Err(e) => {
-                logger.error(&format!("PUT data read error: {}", e));
+                logger.error(&format!("PUT read error: {}", e));
                 logger.access(remote_addr, user, "PUT", url, 500, 0);
                 return empty_response(500);
             }
         }
     }
     
-    logger.debug(&format!("PUT data size: {} bytes", data.len()));
-    
-    match fs::write(physical_path, &data) {
-        Ok(_) => {
-            let status = if physical_path.exists() { 200 } else { 201 };
-            logger.access(remote_addr, user, "PUT", url, status, data.len() as u64);
-            empty_response(status)
-        }
-        Err(e) => {
-            logger.error(&format!("File write error {}: {}", physical_path.display(), e));
-            logger.access(remote_addr, user, "PUT", url, 500, 0);
-            empty_response(500)
-        }
+    // S'assurer que tout est écrit physiquement sur le disque
+    if let Err(e) = output_file.sync_all() {
+        logger.error(&format!("Sync error {}: {}", physical_path.display(), e));
+        logger.access(remote_addr, user, "PUT", url, 500, 0);
+        return empty_response(500);
     }
+    
+    let status = if physical_path.exists() { 200 } else { 201 };
+    logger.access(remote_addr, user, "PUT", url, status, total_bytes);
+    logger.debug(&format!("PUT completed: {} bytes written to {}", total_bytes, physical_path.display()));
+    empty_response(status)
 }
 
 fn handle_delete(physical_path: &Path, user: &str, remote_addr: &str, url: &str, logger: &Logger) -> Response<Cursor<Vec<u8>>> {

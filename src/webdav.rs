@@ -101,19 +101,105 @@ fn add_propfind_response(xml: &mut String, base_url: &str, href: &str, path: &Pa
         if path.is_file() {
             xml.push_str(&format!("        <D:getcontentlength>{}</D:getcontentlength>\n", 
                                   metadata.len()));
-            
-            let content_type = match path.extension().and_then(|e| e.to_str()) {
-                Some("txt") => "text/plain",
-                Some("html") | Some("htm") => "text/html",
-                Some("css") => "text/css",
-                Some("js") => "application/javascript",
-                Some("json") => "application/json",
-                Some("png") => "image/png",
-                Some("jpg") | Some("jpeg") => "image/jpeg",
-                Some("gif") => "image/gif",
-                Some("pdf") => "application/pdf",
-                _ => "application/octet-stream",
-            };
+
+
+	    let content_type = match path.extension().and_then(|e| e.to_str()) {
+	        // Texte
+		Some("txt") => "text/plain",
+		Some("html") | Some("htm") => "text/html",
+		Some("css") => "text/css",
+		Some("js") => "application/javascript",
+		Some("json") => "application/json",
+		Some("xml") => "application/xml",
+		Some("csv") => "text/csv",
+		Some("md") | Some("markdown") => "text/markdown",
+		Some("rtf") => "application/rtf",
+    
+		// Images
+		Some("png") => "image/png",
+		Some("jpg") | Some("jpeg") => "image/jpeg",
+		Some("gif") => "image/gif",
+		Some("svg") => "image/svg+xml",
+		Some("webp") => "image/webp",
+		Some("bmp") => "image/bmp",
+		Some("ico") => "image/x-icon",
+		Some("tiff") | Some("tif") => "image/tiff",
+		Some("avif") => "image/avif",
+		Some("heic") | Some("heif") => "image/heic",
+		Some("psd") => "image/vnd.adobe.photoshop",
+    
+		// Audio
+		Some("mp3") => "audio/mpeg",
+		Some("ogg") => "audio/ogg",
+		Some("opus") => "audio/opus",
+		Some("wav") => "audio/wav",
+		Some("flac") => "audio/flac",
+		Some("aac") => "audio/aac",
+		Some("m4a") => "audio/mp4",
+		Some("wma") => "audio/x-ms-wma",
+		Some("ape") => "audio/ape",
+		Some("mid") | Some("midi") => "audio/midi",
+    
+		// Vidéo
+		Some("mp4") => "video/mp4",
+		Some("mkv") => "video/x-matroska",
+		Some("webm") => "video/webm",
+		Some("avi") => "video/x-msvideo",
+		Some("mov") => "video/quicktime",
+		Some("wmv") => "video/x-ms-wmv",
+		Some("flv") => "video/x-flv",
+		Some("m4v") => "video/x-m4v",
+		Some("mpg") | Some("mpeg") => "video/mpeg",
+		Some("3gp") => "video/3gpp",
+		Some("ogv") => "video/ogg",
+    
+		// Archives et compression
+		Some("zip") => "application/zip",
+		Some("tar") => "application/x-tar",
+		Some("gz") | Some("gzip") => "application/gzip",
+		Some("bz2") => "application/x-bzip2",
+		Some("xz") => "application/x-xz",
+		Some("zst") | Some("zstd") => "application/zstd",
+		Some("br") | Some("brotli") => "application/brotli",
+		Some("7z") => "application/x-7z-compressed",
+		Some("rar") => "application/vnd.rar",
+		Some("iso") => "application/x-iso9660-image",
+    
+		// Documents
+		Some("pdf") => "application/pdf",
+		Some("doc") => "application/msword",
+		Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		Some("odt") => "application/vnd.oasis.opendocument.text",
+		Some("xls") => "application/vnd.ms-excel",
+		Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		Some("ods") => "application/vnd.oasis.opendocument.spreadsheet",
+		Some("ppt") => "application/vnd.ms-powerpoint",
+		Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		Some("odp") => "application/vnd.oasis.opendocument.presentation",
+    
+		// Exécutables et divers
+		Some("exe") => "application/vnd.microsoft.portable-executable",
+		Some("dll") => "application/x-msdownload",
+		Some("msi") => "application/x-msi",
+		Some("bin") => "application/octet-stream",
+		Some("deb") => "application/vnd.debian.binary-package",
+		Some("rpm") => "application/x-rpm",
+		Some("dmg") => "application/x-apple-diskimage",
+    
+		// E-books
+		Some("epub") => "application/epub+zip",
+		Some("mobi") => "application/x-mobipocket-ebook",
+		Some("azw3") => "application/vnd.amazon.ebook",
+		Some("fb2") => "application/x-fictionbook+xml",
+    
+		// Torrent
+		Some("torrent") => "application/x-bittorrent",
+    
+		// Fallback
+		_ => "application/octet-stream",
+	    };
+
+
             xml.push_str(&format!("        <D:getcontenttype>{}</D:getcontenttype>\n", content_type));
             
             if let Ok(modified) = metadata.modified() {
