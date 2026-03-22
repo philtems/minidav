@@ -17,7 +17,7 @@ use brute_force::BruteForceProtector;
 use webdav::LockManager;
 
 const SECRET_DAEMON_FLAG: &str = "--daemonize";
-const VERSION: &str = "1.4.0";
+const VERSION: &str = "1.4.1"; // Version stable sans rate limiting
 const YEAR: &str = "2026";
 const AUTHOR: &str = "Philippe TEMESI";
 const WEBSITE: &str = "https://www.tems.be";
@@ -65,19 +65,16 @@ fn main() {
     let max_attempts = matches.opt_str("max-attempts").unwrap_or_else(|| "5".to_string()).parse::<u32>().unwrap_or(5);
     let block_time = matches.opt_str("block-time").unwrap_or_else(|| "300".to_string()).parse::<u64>().unwrap_or(300);
     let write_cache_mb = matches.opt_str("write-cache").unwrap_or_else(|| "0".to_string()).parse::<usize>().unwrap_or(0);
-    let max_read_rate = matches.opt_str("max-read-rate").and_then(|s| s.parse::<u64>().ok());
-    let max_write_rate = matches.opt_str("max-write-rate").and_then(|s| s.parse::<u64>().ok());
 
     logger = Logger::new(log_file.as_deref(), is_daemonized);
     logger.info(&format!("Starting WebDAV server v{} on {}:{}", VERSION, listen_addr, port));
     logger.info(&format!("Brute-force protection: {} max attempts, {} seconds block time", max_attempts, block_time));
+    
     if write_cache_mb > 0 {
-        logger.info(&format!("Write cache enabled: {} MB", write_cache_mb));
+        logger.info(&format!("Write cache enabled: {} MB (small files buffered)", write_cache_mb));
     } else {
-        logger.info("Write cache disabled: streaming mode");
+        logger.info("Write cache disabled: Direct streaming mode (optimal for large files)");
     }
-    if let Some(rate) = max_read_rate { logger.info(&format!("Max Read Rate: {} Kb/s", rate)); }
-    if let Some(rate) = max_write_rate { logger.info(&format!("Max Write Rate: {} Kb/s", rate)); }
 
     let auth_manager = match AuthManager::from_file(&auth_file, &logger) {
         Ok(am) => am,
@@ -95,7 +92,7 @@ fn main() {
     match DavServer::new(
         &listen_addr, port,
         auth_manager, protector, lock_manager, logger.clone(),
-        write_cache_mb, max_read_rate, max_write_rate
+        write_cache_mb
     ) {
         Ok(s) => s.run(),
         Err(e) => { 
@@ -116,8 +113,6 @@ fn parse_arguments(args: &[String]) -> Result<getopts::Matches, getopts::Fail> {
     opts.optopt("", "block-time", "Block time in seconds (default: 300)", "SECONDS");
     opts.optopt("", "hash-password", "Hash a password and exit", "PASSWORD");
     opts.optopt("", "write-cache", "Write cache size in MB (default: 0, disabled)", "MB");
-    opts.optopt("", "max-read-rate", "Max read speed in Kb/s (default: unlimited)", "KB");
-    opts.optopt("", "max-write-rate", "Max write speed in Kb/s (default: unlimited)", "KB");
     opts.optflag("d", "daemon", "Run in daemon mode");
     opts.optflag("v", "version", "Show version information");
     opts.optflag("h", "help", "Show this help");
@@ -132,11 +127,11 @@ fn print_usage(program: &str) {
     println!("Author: {} - {}", AUTHOR, WEBSITE);
     println!();
     let brief = format!("Usage: {} [options]\n\n\
-                         Minimal WebDAV server with Locking, Range support and Rate Limiting\n\n\
+                         Minimal WebDAV server optimized for streaming large files.\n\n\
                          Examples:\n\
                          {} -p 8080 --auth-file users.txt -l access.log\n\
                          {} -i 127.0.0.1 -p 8888 --auth-file users.txt -d\n\
-                         {} -p 8080 --auth-file users.txt --max-read-rate 1024 --max-write-rate 512\n\
+                         {} -p 8080 --auth-file users.txt --write-cache 64\n\
                          {} --hash-password \"mysecret\"\n\n\
                          Options:", program, program, program, program, program);
     
@@ -149,8 +144,6 @@ fn print_usage(program: &str) {
     opts.optopt("", "block-time", "Block time in seconds (default: 300)", "SECONDS");
     opts.optopt("", "hash-password", "Hash a password and exit", "PASSWORD");
     opts.optopt("", "write-cache", "Write cache size in MB (default: 0)", "MB");
-    opts.optopt("", "max-read-rate", "Max read speed in Kb/s", "KB");
-    opts.optopt("", "max-write-rate", "Max write speed in Kb/s", "KB");
     opts.optflag("d", "daemon", "Run in daemon mode");
     opts.optflag("v", "version", "Show version information");
     opts.optflag("h", "help", "Show this help");
@@ -162,7 +155,7 @@ fn print_version() {
     println!("minidav version {} ({})", VERSION, YEAR);
     println!("Author: {} - {}", AUTHOR, WEBSITE);
     println!("WebDAV server with COPY, MOVE, LOCK, UNLOCK support");
-    println!("Features: Streaming, Range requests, Write Cache, Rate Limiting");
+    println!("Features: Streaming, Range requests, Write Cache, No Rate Limiting");
 }
 
 fn start_daemon_mode(args: &[String], program: &str) {
@@ -207,9 +200,7 @@ fn start_daemon_mode(args: &[String], program: &str) {
         }
         
         match cmd.spawn() {
-            Ok(_child) => {
-                process::exit(0);
-            }
+            Ok(_child) => process::exit(0),
             Err(e) => {
                 eprintln!("Error starting daemon: {}", e);
                 process::exit(1);

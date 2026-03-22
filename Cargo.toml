@@ -1,32 +1,20 @@
 [package]
 name = "minidav"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
 authors = ["Philippe TEMESI"]
-description = "Minimal WebDAV server with Locking, Range support and Rate Limiting"
+description = "Minimal WebDAV server with Locking and Range support (Stable)"
 
 [dependencies]
-# Serveur HTTP/WebDAV (sans SSL pour simplifier et garantir la compatibilité)
 tiny_http = "0.12"
-
-# Outils ligne de commande
 getopts = "0.2"
-
-# Encodage et Crypto
 base64 = "0.22"
 percent-encoding = "2.3"
 sha2 = "0.10"
 hex = "0.4"
-
-# Gestion date/heure
 chrono = "0.4"
-
-# Appel système (pour le mode daemon)
 libc = "0.2"
 
-# ==========================================
-# OPTIMISATIONS DE TAILLE ET PERFORMANCE
-# ==========================================
 [profile.release]
 codegen-units = 1
 lto = true
@@ -35,4 +23,3 @@ panic = "abort"
 split-debuginfo = "packed"
 strip = true
 incremental = true
-
