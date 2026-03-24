@@ -8,6 +8,23 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use crate::logging::Logger;
 use chrono::{DateTime, Utc};
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+
+// --- CORRECTION ICI ---
+// On définit un ensemble de caractères "sûrs" qui ne seront JAMAIS encodés.
+// On part de NON_ALPHANUMERIC et on RETIRE :
+// - b'/' (séparateur de chemin, déjà géré par la logique)
+// - b'-' (tiret)
+// - b'_' (underscore)
+// - b'.' (point, pour les extensions)
+// - b'~' (tilde, souvent utilisé)
+const SAFE_URL_CHARS: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'/')
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+// ----------------------
 
 // --- Gestionnaire de Verrous (Lock Manager) ---
 
@@ -30,7 +47,6 @@ impl LockManager {
             logger,
         });
         
-        // Thread de nettoyage (chaque minute)
         let mgr_clone = manager.clone();
         thread::spawn(move || {
             loop {
@@ -54,12 +70,11 @@ impl LockManager {
     
     pub fn create_lock(&self, path: &Path, owner: &str) -> String {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let expires = now + 3600; // 1 heure
+        let expires = now + 3600;
         
         let token = format!("<opaquelocktoken:{}-{}>", owner, now);
         
         let mut locks = self.locks.lock().unwrap();
-        // Supprimer d'éventuels anciens verrous sur ce chemin par le même utilisateur
         locks.retain(|_, entry| !(entry.path == path && entry.owner == owner));
         
         locks.insert(token.clone(), LockEntry {
@@ -77,16 +92,13 @@ impl LockManager {
         let locks = self.locks.lock().unwrap();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         
-        // Vérifier s'il existe un verrou actif sur ce chemin
         for entry in locks.values() {
             if entry.path == path && entry.expires_at > now {
-                // Un verrou existe. Est-ce le bon token ?
                 if let Some(token) = token_opt {
                     if entry.token == token {
-                        return Ok(()); // C'est le bon propriétaire
+                        return Ok(());
                     }
                 }
-                // Verrouillé par quelqu'un d'autre (ou token manquant)
                 return Err(format!("Locked by {}", entry.owner));
             }
         }
@@ -141,16 +153,15 @@ pub fn handle_propfind(request: &Request, physical_path: &Path, user: &str, remo
     
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\">\n");
     
-    // Ajout du dossier/fichier principal (tolérant aux erreurs)
+    // Pour la racine, on utilise l'URL telle quelle (elle vient du client, donc déjà correcte)
+    // Mais on s'assure qu'elle est propre si besoin (optionnel, souvent inutile pour la racine)
     if let Err(e) = add_propfind_response(&mut xml, &base_url, url, physical_path) {
         logger.warning(&format!("Propfind error on root {}: {}", physical_path.display(), e));
-        // On continue quand même pour les enfants si possible
     }
     
     if depth != "0" && physical_path.is_dir() {
         if let Ok(entries) = fs::read_dir(physical_path) {
-            for entry in entries.flatten() { // flatten() ignore les erreurs de lecture d'entrée
-                // TOLÉRANCE : On ignore les fichiers qui causent des erreurs de nommage
+            for entry in entries.flatten() {
                 let name = match entry.file_name().into_string() {
                     Ok(n) => n,
                     Err(bad) => {
@@ -159,15 +170,23 @@ pub fn handle_propfind(request: &Request, physical_path: &Path, user: &str, remo
                     }
                 };
                 
-                // Vérification longueur chemin
-                let child_url = if url.ends_with('/') { format!("{}{}", url, name) } else { format!("{}/{}", url, name) };
+                // ENCODAGE CIBLÉ : Seul le nom du fichier est encodé avec SAFE_URL_CHARS
+                // Cela préservera les tirets, underscores et points.
+                let encoded_name = utf8_percent_encode(&name, SAFE_URL_CHARS).to_string();
+                
+                let child_url = if url.ends_with('/') { 
+                    format!("{}{}", url, encoded_name) 
+                } else { 
+                    format!("{}/{}", url, encoded_name) 
+                };
+                
                 let child_path = physical_path.join(&name);
                 
-                if !child_path.starts_with(physical_path) { continue; } // Sécurité
+                if !child_path.starts_with(physical_path) { continue; }
                 
                 if let Err(e) = add_propfind_response(&mut xml, &base_url, &child_url, &child_path) {
                     logger.debug(&format!("Skipping entry {} due to error: {}", name, e));
-                    continue; // On saute ce fichier, on ne plante pas
+                    continue;
                 }
             }
         }
@@ -182,9 +201,16 @@ pub fn handle_propfind(request: &Request, physical_path: &Path, user: &str, remo
     response
 }
 
-// Version modifiée pour retourner un Result au lieu de paniquer
 fn add_propfind_response(xml: &mut String, base_url: &str, href: &str, path: &Path) -> Result<(), String> {
-    let full_href = if href.starts_with('/') { format!("{}{}", base_url, href) } else { format!("{}/{}", base_url, href) };
+    // L'URL 'href' arrive déjà encodée segment par segment depuis handle_propfind.
+    // On ne la ré-encode pas entièrement pour éviter de doubler les '%' si l'URL est déjà propre.
+    // On l'utilise telle quelle pour construire le lien complet.
+    
+    let full_href = if href.starts_with('/') { 
+        format!("{}{}", base_url, href) 
+    } else { 
+        format!("{}/{}", base_url, href) 
+    };
     
     xml.push_str("  <D:response>\n");
     xml.push_str(&format!("    <D:href>{}</D:href>\n", full_href));
@@ -291,8 +317,6 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-// --- LOCK / UNLOCK avec LockManager ---
-
 pub fn handle_lock(request: &Request, physical_path: &Path, user: &str, remote_addr: &str, url: &str, logger: &Logger, lock_mgr: Arc<LockManager>) -> Response<Cursor<Vec<u8>>> {
     if !physical_path.exists() {
         logger.access(remote_addr, user, "LOCK", url, 404, 0);
@@ -337,7 +361,6 @@ pub fn handle_unlock(request: &Request, physical_path: &Path, user: &str, remote
         }
     }
     
-    // Token invalide ou manquant, mais on répond 204 pour compatibilité (ou 400 selon rigueur)
     logger.debug("Unlock request with invalid/missing token");
     empty_response(204)
 }
